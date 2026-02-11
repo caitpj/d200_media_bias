@@ -1,0 +1,93 @@
+D200 Project
+Stefan Bucher
+
+The goal of the small-scale research project is to apply machine learning to an economic
+question, and to permit you to develop your skills in an area of your interest. The format
+is intended to simulate submitting to a research conference, and you should treat it as such:
+focus on a clear research question, a sound method, and transparent communication.
+
+Assessment and Deliverables
+The research project is assessed via a written project report and an oral examination which
+constitutes a brief presentation and a Question and Answer session. All elements are essential
+and constitute 100% weighting.
+
+Project Report (due 16 Mar 2026, 12 noon)
+The project report should be of 3 single-spaced pages (approximately 1500 words) including
+figures, and is to be submitted through the Faculty’s submission system.
+A strong report is concise and easy to follow. The report should clearly articulate:
+• Motivation and research question: What are you asking and why does it matter?
+• Minimal literature review: What is already known that your project builds on?
+• Data: What data are you using and how did you prepare it?
+• Methodology: What ML technique(s) are you using and why?
+• Implementation Details (important!): How exactly did you implement the ML technique?
+Provide key code snippets or pseudocode if helpful.
+• Results: What do you find? Include figures/tables where informative.
+• Discussion: What worked? What did not work and why? What next steps would you
+take?
+To format your report I recommend using a style file for conference submission (NeurIPS,
+ICML, etc.). When doing so, please be careful that the metadata (title, author, etc.) of your
+submitted file is correct.
+
+Oral Examination (23-25 Mar 2026)
+The oral examination will last approximately 15 minutes per student, and will start with a
+brief (5-7 minutes) presentation in which you are asked (much like in the report) to cover:
+• research question
+• brief description of dataset
+• ML method (be precise!)
+• preliminary results
+• challenges & how they could be addressed with more time
+Please prepare slides for the presentation and submit them before your examination at https://
+classroom.github.com/classrooms/195107486-machine-learning-in-economics-2026 as part of a
+GitHub repository containing all your code and data (or clear data access instructions) for the
+project along with the final report and slides. Include a README with basic instructions allowing
+me to reproduce your results.
+
+Rubric
+No specific rubric is provided, but marking will take into account the clarity with which you
+address your chosen research question and your understanding of the methods used.
+
+Advice
+The most important advice by far is to focus on clarity: Keep it simple, but make it work. Allow
+me to understand exactly what you did (and make sure you do, too!). Correct implementation
+and clear explanation are more important than complexity.
+Project Steps
+1. Pick an economic question that ML can help answer.
+2. Find & preprocess data.
+3. Apply ML Methods, possibly compare with traditional econometric methods.
+
+Inspiration
+Upon popular request, below are some example ideas and projects from previous years.
+Previous years’ projects covered a wide range of applied topics that can help you brainstorm:
+• causal inference and treatment heterogeneity (DDML, causal forests, policy evaluation)
+• macro nowcasting/forecasting (GDP, recession signals, alternative data like Google
+Trends)
+• platform economics (recommendation systems, churn prediction)
+• labor/organization questions (employee attrition, wage premiums)
+• housing and auto price prediction (house prices, used car values)
+• auction and platform behavior (pay-to-bid auctions, pricing dynamics)
+• mobility and energy demand modeling
+• algorithmic fairness and discrimination (lending, pricing)
+• physics-informed/quant methods (PINNs for Black–Scholes)
+• financial time-series forecasting (stocks, gold, crypto; ML vs ARIMA/VAR)
+• text-as-data and sentiment (parliamentary debates, news, social media)
+• volatility and event detection in financial news (topic models, NLP classifiers)
+• credit risk and default prediction (loan default, credit scoring, tabular deep learning)
+• portfolio construction and hedging (deep PPP, credit curve hedging, PCA/K-means)
+Please use them only as vague inspiration to get a sense of the types of projects that have
+been done, but you are explicitly encouraged to come up with your own ideas and the above
+are in no way exhaustive or representative.
+
+Public Datasets
+A far from exhaustive list of public datasets:
+• World in Data: https://ourworldindata.org/data
+• World Bank: https://data.worldbank.org/
+• IMF: https://www.imf.org/en/Data
+• UN Data: http://data.un.org/
+• OECD: https://data.oecd.org/
+• Eurostat: https://ec.europa.eu/eurostat/data
+• FRED: https://fred.stlouisfed.org/
+• Data.gov: https://www.data.gov/
+• UK Data Service: https://www.ukdataservice.ac.uk/
+• Kaggle: https://www.kaggle.com/datasets
+• UCI ML Repository: https://archive.ics.uci.edu/ml/index.php
+• Google Dataset Search: https://datasetsearch.research.google.com/
