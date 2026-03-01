@@ -1,26 +1,41 @@
 """
-analyse_v2.py — Combined bias and sentiment analysis on party mentions.
+analyse.py — PRIMARY ANALYSIS: Reform UK vs Plaid Cymru head-to-head.
 
-Runs two models on the same sample:
-  1. himel7/bias-detector — sentence-level media bias detection (biased/non-biased)
-  2. cardiffnlp/twitter-roberta-base-sentiment-latest — general sentiment (neg/neu/pos)
+Pipeline:
+  Stage 1: Bias detection (himel7/bias-detector)
+  Stage 2: LLM entity-level sentiment attribution (Claude Haiku 4.5 API)
+  Stage 3: Statistical analysis and reporting
 
-Combines both to determine presence, rate, and direction of media bias.
+Each stage is optional via flags. By default, all stages run.
+
+Scope:
+  - News articles only (excludes opinion pieces)
+  - Editorial voice only (excludes quoted speech)
+  - 2021 onwards (Reform UK's Welsh political presence)
+  - Focus on Reform UK and Plaid Cymru
 
 Usage:
-    python scripts/analyse_v2.py
-
-Requirements:
-    pip install pandas torch transformers sentencepiece protobuf
+    python scripts/analyse.py                  # Run all stages
+    python scripts/analyse.py --bias           # Stage 1 only
+    python scripts/analyse.py --llm            # Stage 2 only (needs Stage 1 output)
+    python scripts/analyse.py --analyse        # Stage 3 only (needs Stage 1+2 output)
+    python scripts/analyse.py --bias --llm     # Stages 1+2
+    python scripts/analyse.py --llm --analyse  # Stages 2+3
 """
 
 import os
-import time
+import sys
+import argparse
 
 import pandas as pd
 import numpy as np
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from scipy import stats
+
+sys.path.insert(0, os.path.dirname(__file__))
+from ml_utils import (
+    get_device, get_article_type, run_bias_pipeline,
+    run_llm_classification, merge_llm_results,
+)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -28,370 +43,343 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 MENTIONS_PATH = os.path.join(os.path.dirname(__file__), "..", "data",
                              "processed", "party_mentions.csv")
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
+OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "primary")
 
-BIAS_MODEL = "himel7/bias-detector"
-SENTIMENT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
-
-TARGET_PARTIES = ["reform_uk", "plaid_cymru", "labour", "conservative", "ukip"]
+FOCUS_PARTIES = ["reform_uk", "plaid_cymru"]
+MIN_YEAR = 2022
 
 SAMPLE_FRAC = 1.0
 RANDOM_SEED = 42
 
-MAX_LENGTH = 512
-BATCH_SIZE = 16
-
 
 # ---------------------------------------------------------------------------
-# Device
+# Stage 1: Bias detection
 # ---------------------------------------------------------------------------
 
-def get_device():
-    if torch.backends.mps.is_available():
-        print("  Using MPS (Apple Silicon GPU)")
-        return torch.device("mps")
-    elif torch.cuda.is_available():
-        print("  Using CUDA GPU")
-        return torch.device("cuda")
-    else:
-        print("  Using CPU")
-        return torch.device("cpu")
-
-
-# ---------------------------------------------------------------------------
-# Generic batch scoring
-# ---------------------------------------------------------------------------
-
-def score_batch(texts, tokenizer, model, device, text_pairs=None):
-    """Score a batch of texts. Returns softmax probabilities."""
-    encodings = tokenizer(
-        texts,
-        text_pair=text_pairs,
-        padding=True,
-        truncation=True,
-        max_length=MAX_LENGTH,
-        return_tensors="pt",
-    )
-    encodings = {k: v.to(device) for k, v in encodings.items()}
-
-    with torch.no_grad():
-        outputs = model(**encodings)
-        probs = torch.softmax(outputs.logits, dim=-1)
-
-    return probs.cpu().numpy()
-
-
-# ---------------------------------------------------------------------------
-# Model runners
-# ---------------------------------------------------------------------------
-
-def run_bias_detector(df, device):
-    """Run bias detection on the sentence column."""
-    print("\n" + "=" * 60)
-    print("MODEL 1: BIAS DETECTOR (himel7/bias-detector)")
-    print("=" * 60)
-
-    print(f"  Loading model...")
-    tokenizer = AutoTokenizer.from_pretrained(BIAS_MODEL)
-    model = AutoModelForSequenceClassification.from_pretrained(BIAS_MODEL)
-    model.to(device)
-    model.eval()
-
-    id2label = model.config.id2label
-    print(f"  Label mapping: {id2label}")
-
-    all_results = []
-    total = len(df)
-    start_time = time.time()
-
-    for batch_start in range(0, total, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, total)
-        batch = df.iloc[batch_start:batch_end]
-        texts = batch["sentence"].fillna("").tolist()
-
-        probs = score_batch(texts, tokenizer, model, device)
-
-        for i in range(len(texts)):
-            scores = probs[i]
-            pred_idx = int(scores.argmax())
-            pred_label = id2label[pred_idx]
-            is_biased = pred_label.lower() in ("biased", "bias", "label_1", "1")
-
-            all_results.append({
-                "bias_label": "biased" if is_biased else "non-biased",
-                "bias_confidence": float(scores[pred_idx]),
-            })
-
-        if (batch_start // BATCH_SIZE) % 50 == 0:
-            elapsed = time.time() - start_time
-            rate = (batch_start + len(batch)) / elapsed if elapsed > 0 else 0
-            remaining = (total - batch_start - len(batch)) / rate if rate > 0 else 0
-            print(f"  {batch_start + len(batch)}/{total} "
-                  f"({rate:.1f}/sec, ~{remaining:.0f}s remaining)")
-
-    elapsed = time.time() - start_time
-    print(f"  Done. {total} sentences in {elapsed:.0f}s ({total/elapsed:.1f}/sec)")
-
-    # Free memory
-    del model, tokenizer
-    if device.type == "mps":
-        torch.mps.empty_cache()
-
-    return pd.DataFrame(all_results)
-
-
-def run_sentiment(df, device):
-    """Run general sentiment on the context column."""
-    print("\n" + "=" * 60)
-    print("MODEL 2: SENTIMENT (cardiffnlp/twitter-roberta-base-sentiment)")
-    print("=" * 60)
-
-    print(f"  Loading model...")
-    tokenizer = AutoTokenizer.from_pretrained(SENTIMENT_MODEL)
-    model = AutoModelForSequenceClassification.from_pretrained(SENTIMENT_MODEL)
-    model.to(device)
-    model.eval()
-
-    # Cardiff NLP: 0=negative, 1=neutral, 2=positive
-    label_map = {0: "negative", 1: "neutral", 2: "positive"}
-
-    all_results = []
-    total = len(df)
-    start_time = time.time()
-
-    for batch_start in range(0, total, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, total)
-        batch = df.iloc[batch_start:batch_end]
-        texts = batch["context"].fillna("").tolist()
-
-        probs = score_batch(texts, tokenizer, model, device)
-
-        for i in range(len(texts)):
-            scores = probs[i]
-            pred_idx = int(scores.argmax())
-            all_results.append({
-                "sentiment": label_map[pred_idx],
-                "sent_score_negative": float(scores[0]),
-                "sent_score_neutral": float(scores[1]),
-                "sent_score_positive": float(scores[2]),
-                "sentiment_score": float(scores[2] - scores[0]),
-            })
-
-        if (batch_start // BATCH_SIZE) % 50 == 0:
-            elapsed = time.time() - start_time
-            rate = (batch_start + len(batch)) / elapsed if elapsed > 0 else 0
-            remaining = (total - batch_start - len(batch)) / rate if rate > 0 else 0
-            print(f"  {batch_start + len(batch)}/{total} "
-                  f"({rate:.1f}/sec, ~{remaining:.0f}s remaining)")
-
-    elapsed = time.time() - start_time
-    print(f"  Done. {total} contexts in {elapsed:.0f}s ({total/elapsed:.1f}/sec)")
-
-    # Free memory
-    del model, tokenizer
-    if device.type == "mps":
-        torch.mps.empty_cache()
-
-    return pd.DataFrame(all_results)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main():
+def stage_bias():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    # Load and sample
-    print("Loading mentions...")
-    df = pd.read_csv(MENTIONS_PATH)
-    df = df[df["party"].isin(TARGET_PARTIES)].copy()
-    print(f"  {len(df)} mentions for {TARGET_PARTIES}")
+    print("=" * 60)
+    print("STAGE 1: BIAS DETECTION")
+    print(f"  Reform UK vs Plaid Cymru, news, editorial only, {MIN_YEAR}+")
+    print("=" * 60)
 
+    print("\nLoading mentions...")
+    df = pd.read_csv(MENTIONS_PATH)
+    df["publish_date"] = pd.to_datetime(df["publish_date"], errors="coerce")
+    df["year"] = df["publish_date"].dt.year
+    df["article_type"] = df["url"].apply(get_article_type)
+
+    print(f"  Total mentions: {len(df)}")
+
+    df = df[
+        (df["party"].isin(FOCUS_PARTIES)) &
+        (df["year"] >= MIN_YEAR) &
+        (df["article_type"] == "news") &
+        (df["is_quote"] == False)
+    ].copy()
+    print(f"  After filtering: {len(df)}")
+
+    for party in FOCUS_PARTIES:
+        n = (df["party"] == party).sum()
+        print(f"    {party}: {n}")
+
+    # Sample
     df_sample = pd.concat([
         group.sample(frac=SAMPLE_FRAC, random_state=RANDOM_SEED)
         for _, group in df.groupby("party")
     ]).reset_index(drop=True)
 
     print(f"  Sampled {len(df_sample)} mentions ({SAMPLE_FRAC:.0%})")
-    for party in TARGET_PARTIES:
+    for party in FOCUS_PARTIES:
         print(f"    {party}: {(df_sample['party'] == party).sum()}")
 
     device = get_device()
+    df_all, df_biased = run_bias_pipeline(df_sample, device)
 
-    # Run both models
-    bias_results = run_bias_detector(df_sample, device)
-    sent_results = run_sentiment(df_sample, device)
+    all_path = os.path.join(OUTPUT_DIR, "primary_all.csv")
+    df_all.to_csv(all_path, index=False)
+    print(f"  Saved: {all_path}")
 
-    # Combine everything
-    df_out = pd.concat([
-        df_sample.reset_index(drop=True),
-        bias_results,
-        sent_results,
-    ], axis=1)
+    print("\n  Bias rates:")
+    for party in FOCUS_PARTIES:
+        subset = df_all[df_all["party"] == party]
+        n = len(subset)
+        n_b = subset["is_biased"].sum()
+        print(f"    {party}: {n_b}/{n} ({n_b/n:.1%})")
 
-    # Parse dates
-    df_out["publish_date"] = pd.to_datetime(df_out["publish_date"],
+
+# ---------------------------------------------------------------------------
+# Stage 2: LLM classification
+# ---------------------------------------------------------------------------
+
+def stage_llm():
+    print("\n" + "=" * 60)
+    print("STAGE 2: LLM CLASSIFICATION")
+    print("=" * 60)
+
+    all_path = os.path.join(OUTPUT_DIR, "primary_all.csv")
+    if not os.path.exists(all_path):
+        print(f"  ERROR: {all_path} not found. Run --bias first.")
+        return
+
+    df_all = pd.read_csv(all_path)
+    df_biased = df_all[df_all["is_biased"] == 1].copy()
+    print(f"  {len(df_biased)} biased mentions to classify")
+
+    results_df = run_llm_classification(df_biased, OUTPUT_DIR)
+    df_biased = merge_llm_results(df_biased, results_df)
+
+    df_on_target = df_biased[df_biased["on_target"] == 1].copy()
+    n_off = (df_biased["on_target"] == 0).sum()
+    print(f"\n  On-target: {len(df_on_target)}")
+    print(f"  Off-target: {n_off} ({n_off/len(df_biased):.1%})")
+
+    biased_path = os.path.join(OUTPUT_DIR, "primary_biased.csv")
+    df_on_target.to_csv(biased_path, index=False)
+    print(f"  Saved: {biased_path}")
+
+    full_path = os.path.join(OUTPUT_DIR, "biased_with_llm.csv")
+    df_biased.to_csv(full_path, index=False)
+    print(f"  Saved: {full_path}")
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: Analysis
+# ---------------------------------------------------------------------------
+
+def stage_analyse():
+    print("\n" + "=" * 60)
+    print("STAGE 3: ANALYSIS")
+    print("=" * 60)
+
+    all_path = os.path.join(OUTPUT_DIR, "primary_all.csv")
+    llm_path = os.path.join(OUTPUT_DIR, "llm_results.csv")
+
+    if not os.path.exists(all_path):
+        print(f"  ERROR: {all_path} not found. Run --bias first.")
+        return
+    if not os.path.exists(llm_path):
+        print(f"  ERROR: {llm_path} not found. Run --llm first.")
+        return
+
+    df_all = pd.read_csv(all_path)
+    df_all["publish_date"] = pd.to_datetime(df_all["publish_date"],
                                              errors="coerce")
-    df_out["year"] = df_out["publish_date"].dt.year
-    df_out["is_biased"] = (df_out["bias_label"] == "biased").astype(int)
+    df_all["year"] = df_all["publish_date"].dt.year
 
-    # Save
-    output_path = os.path.join(OUTPUT_DIR, "analysis_results.csv")
-    df_out.to_csv(output_path, index=False)
-    print(f"\n  Saved to {output_path}")
+    df_biased_raw = df_all[df_all["is_biased"] == 1].copy()
+    df_biased = merge_llm_results(df_biased_raw, pd.read_csv(llm_path))
 
-    # ===================================================================
-    # RESULTS
-    # ===================================================================
+    df_on_target = df_biased[df_biased["on_target"] == 1].copy()
+    n_off = (df_biased["on_target"] == 0).sum()
 
-    print("\n" + "=" * 60)
-    print("BIAS DETECTION RESULTS")
-    print("=" * 60)
+    # Save updated files
+    biased_path = os.path.join(OUTPUT_DIR, "primary_biased.csv")
+    df_on_target.to_csv(biased_path, index=False)
 
-    # Bias rate by party
-    print("\n  Bias rate by party:")
-    for party in TARGET_PARTIES:
-        subset = df_out[df_out["party"] == party]
-        n = len(subset)
-        n_biased = subset["is_biased"].sum()
-        print(f"    {party}: {n_biased/n:.1%} ({n_biased}/{n})")
-
-    # Bias distribution
-    print("\n  Bias distribution (%):")
-    dist = pd.crosstab(df_out["party"], df_out["bias_label"],
-                       normalize="index")
-    print((dist * 100).round(1).to_string())
-
-    # Quote vs non-quote
-    print("\n  Bias rate by party and quote status:")
-    quote_bias = df_out.groupby(
-        ["party", "is_quote"])["is_biased"].mean()
-    print(quote_bias.round(3).to_string())
-
-    # By year
-    print("\n  Bias rate by party and year:")
-    yearly_bias = df_out.groupby(
-        ["year", "party"])["is_biased"].mean().unstack()
-    print((yearly_bias * 100).round(1).to_string())
+    full_path = os.path.join(OUTPUT_DIR, "biased_with_llm.csv")
+    df_biased.to_csv(full_path, index=False)
 
     # ===================================================================
-    # SENTIMENT RESULTS
+    # HEAD-TO-HEAD
     # ===================================================================
 
     print("\n" + "=" * 60)
-    print("SENTIMENT RESULTS (Cardiff NLP)")
+    print("REFORM UK vs PLAID CYMRU — HEAD TO HEAD")
     print("=" * 60)
 
-    print("\n  Mean sentiment score by party (-1 to +1):")
-    sent_means = df_out.groupby("party")["sentiment_score"].agg(
-        ["mean", "std", "count"])
-    print(sent_means.round(3).to_string())
+    for party in FOCUS_PARTIES:
+        subset_all = df_all[df_all["party"] == party]
+        subset_biased = df_on_target[df_on_target["party"] == party]
+        n = len(subset_all)
+        n_b = len(subset_biased)
 
-    print("\n  Sentiment distribution (%):")
-    sent_dist = pd.crosstab(df_out["party"], df_out["sentiment"],
-                            normalize="index")
-    print((sent_dist * 100).round(1).to_string())
+        print(f"\n  {party}:")
+        print(f"    Total mentions:       {n}")
+        print(f"    Biased (on-target):   {n_b} ({n_b/n:.1%})")
+        if n_b > 0:
+            print(f"    Mean sentiment:       {subset_biased['sentiment_score'].mean():+.3f}")
+            print(f"    Weighted bias score:  {subset_biased['weighted_bias_score'].mean():+.3f}")
+            neg = (subset_biased["sentiment_score"] < 0).sum()
+            pos = (subset_biased["sentiment_score"] > 0).sum()
+            print(f"    Negative toward:      {neg} ({neg/n_b:.1%})")
+            print(f"    Positive toward:      {pos} ({pos/n_b:.1%})")
 
     # ===================================================================
-    # BIAS DIRECTION (combined)
+    # STATISTICAL TESTS
     # ===================================================================
 
     print("\n" + "=" * 60)
-    print("BIAS DIRECTION (bias detector + sentiment)")
+    print("STATISTICAL TESTS")
     print("=" * 60)
 
-    median_sent = df_out["sentiment_score"].median()
-    print(f"\n  Median sentiment (all sentences): {median_sent:+.3f}")
-    print(f"  Sentences below median = relatively negative")
+    reform_all = df_all[df_all["party"] == "reform_uk"]
+    plaid_all = df_all[df_all["party"] == "plaid_cymru"]
+    reform_biased = df_on_target[df_on_target["party"] == "reform_uk"]
+    plaid_biased = df_on_target[df_on_target["party"] == "plaid_cymru"]
 
-    biased = df_out[df_out["is_biased"] == 1].copy()
-    biased["bias_direction"] = "neutral"
-    biased.loc[biased["sentiment_score"] < median_sent, "bias_direction"] = "negative"
-    biased.loc[biased["sentiment_score"] > median_sent, "bias_direction"] = "positive"
+    # 1. On-target bias rate: z-test
+    n_r, n_p = len(reform_all), len(plaid_all)
+    b_r = len(reform_biased)
+    b_p = len(plaid_biased)
+    r_r, r_p = b_r / n_r, b_p / n_p
+    p_pooled = (b_r + b_p) / (n_r + n_p)
+    se = np.sqrt(p_pooled * (1 - p_pooled) * (1/n_r + 1/n_p))
+    z = (r_r - r_p) / se if se > 0 else 0
+    p_val_z = 2 * (1 - stats.norm.cdf(abs(z)))
+    h = 2 * (np.arcsin(np.sqrt(r_r)) - np.arcsin(np.sqrt(r_p)))
 
-    print(f"\n  Total biased sentences: {len(biased)}")
+    print(f"\n  1. On-target bias rate (z-test for proportions):")
+    print(f"     Reform: {r_r:.1%}  vs  Plaid: {r_p:.1%}")
+    print(f"     z = {z:+.3f}, p = {p_val_z:.4f}, Cohen's h = {h:+.3f}")
+    print(f"     {'Significant at p<0.05' if p_val_z < 0.05 else 'Not significant'}")
 
-    print("\n  Bias direction by party (relative to median):")
-    dir_dist = pd.crosstab(biased["party"], biased["bias_direction"],
-                           normalize="index")
-    print((dir_dist * 100).round(1).to_string())
+    # 2. Sentiment: t-test
+    if len(reform_biased) > 0 and len(plaid_biased) > 0:
+        s_r = reform_biased["sentiment_score"]
+        s_p = plaid_biased["sentiment_score"]
+        t_stat, p_val_t = stats.ttest_ind(s_r, s_p)
+        pooled_std = np.sqrt(
+            ((len(s_r)-1)*s_r.std()**2 + (len(s_p)-1)*s_p.std()**2)
+            / (len(s_r)+len(s_p)-2))
+        d = (s_r.mean() - s_p.mean()) / pooled_std if pooled_std > 0 else 0
 
-    print("\n  Bias direction counts:")
-    dir_counts = pd.crosstab(biased["party"], biased["bias_direction"])
-    print(dir_counts.to_string())
+        print(f"\n  2. Sentiment of on-target biased mentions (t-test):")
+        print(f"     Reform: {s_r.mean():+.3f}  vs  Plaid: {s_p.mean():+.3f}")
+        print(f"     t = {t_stat:+.3f}, p = {p_val_t:.4f}, Cohen's d = {d:+.3f}")
+        print(f"     {'Significant at p<0.05' if p_val_t < 0.05 else 'Not significant'}")
 
-    # Mean sentiment of biased vs non-biased
-    print("\n  Mean sentiment — biased sentences:")
-    print(biased.groupby("party")["sentiment_score"].agg(
-        ["mean", "std", "count"]).round(3).to_string())
+    # 3. Weighted bias score: t-test
+    if len(reform_biased) > 0 and len(plaid_biased) > 0:
+        w_r = reform_biased["weighted_bias_score"]
+        w_p = plaid_biased["weighted_bias_score"]
+        t_stat_w, p_val_w = stats.ttest_ind(w_r, w_p)
+        pooled_std_w = np.sqrt(
+            ((len(w_r)-1)*w_r.std()**2 + (len(w_p)-1)*w_p.std()**2)
+            / (len(w_r)+len(w_p)-2))
+        d_w = (w_r.mean() - w_p.mean()) / pooled_std_w if pooled_std_w > 0 else 0
 
-    non_biased = df_out[df_out["is_biased"] == 0]
-    print("\n  Mean sentiment — non-biased sentences:")
-    print(non_biased.groupby("party")["sentiment_score"].agg(
-        ["mean", "std", "count"]).round(3).to_string())
+        print(f"\n  3. Weighted bias score (t-test):")
+        print(f"     Reform: {w_r.mean():+.3f}  vs  Plaid: {w_p.mean():+.3f}")
+        print(f"     t = {t_stat_w:+.3f}, p = {p_val_w:.4f}, Cohen's d = {d_w:+.3f}")
+        print(f"     {'Significant at p<0.05' if p_val_w < 0.05 else 'Not significant'}")
 
-    # Editorial vs quoted direction
-    print("\n  Bias direction by party and quote status:")
-    for party in TARGET_PARTIES:
-        print(f"\n    {party}:")
-        party_biased = biased[biased["party"] == party]
-        for is_quote in [False, True]:
-            label = "Quoted" if is_quote else "Editorial"
-            subset = party_biased[party_biased["is_quote"] == is_quote]
+    # ===================================================================
+    # SENTIMENT STRENGTH BREAKDOWN
+    # ===================================================================
+
+    print("\n" + "=" * 60)
+    print("SENTIMENT STRENGTH BREAKDOWN (on-target biased mentions)")
+    print("=" * 60)
+
+    bins = [
+        ("Strong negative", -1.01, -0.75),
+        ("Moderate negative", -0.75, -0.0),
+        ("Neutral/weak", -0.0, 0.0),
+        ("Moderate positive", 0.0, 0.75),
+        ("Strong positive", 0.75, 1.01),
+    ]
+
+    print(f"\n  {'':20s}", end="")
+    for party in FOCUS_PARTIES:
+        print(f"  {party:>14s}", end="")
+    print()
+    print(f"  {'-'*50}")
+
+    for label, lo, hi in bins:
+        print(f"  {label:20s}", end="")
+        for party in FOCUS_PARTIES:
+            subset = df_on_target[df_on_target["party"] == party]
             if len(subset) == 0:
+                print(f"  {'n/a':>14s}", end="")
                 continue
-            neg = (subset["bias_direction"] == "negative").sum()
-            pos = (subset["bias_direction"] == "positive").sum()
-            total_sub = len(subset)
-            print(f"      {label} (n={total_sub}): "
-                  f"neg={neg} ({neg/total_sub:.0%}), "
-                  f"pos={pos} ({pos/total_sub:.0%})")
+            if label == "Neutral/weak":
+                count = (subset["sentiment_score"] == 0).sum()
+            else:
+                count = ((subset["sentiment_score"] > lo) &
+                         (subset["sentiment_score"] <= hi)).sum()
+            pct = count / len(subset)
+            print(f"  {count:>4d} ({pct:>5.1%})", end="")
+        print()
 
-    # Yearly negative bias rate
-    print("\n  Negative bias rate by party and year:")
-    df_out["is_neg_biased"] = (
-        (df_out["is_biased"] == 1) &
-        (df_out["sentiment_score"] < median_sent)
-    ).astype(int)
-    yearly_neg = df_out.groupby(
-        ["year", "party"])["is_neg_biased"].mean().unstack()
-    print((yearly_neg * 100).round(1).to_string())
+    print(f"\n  Strong signal ratio (strong neg / strong pos):")
+    for party in FOCUS_PARTIES:
+        subset = df_on_target[df_on_target["party"] == party]
+        if len(subset) == 0:
+            continue
+        strong_neg = (subset["sentiment_score"] <= -0.75).sum()
+        strong_pos = (subset["sentiment_score"] >= 0.75).sum()
+        ratio = strong_neg / strong_pos if strong_pos > 0 else float('inf')
+        print(f"    {party}: {strong_neg} neg vs {strong_pos} pos "
+              f"(ratio: {ratio:.1f}x)")
 
     # ===================================================================
-    # SUMMARY
+    # COVERAGE VOLUME
     # ===================================================================
 
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print("COVERAGE VOLUME")
     print("=" * 60)
 
-    for party in TARGET_PARTIES:
-        subset = df_out[df_out["party"] == party]
-        n = len(subset)
-        bias_pct = subset["is_biased"].mean()
-        sent_mean = subset["sentiment_score"].mean()
+    articles_reform = df_all[df_all["party"] == "reform_uk"]["url"].nunique()
+    articles_plaid = df_all[df_all["party"] == "plaid_cymru"]["url"].nunique()
+    print(f"\n  Unique articles mentioning Reform UK: {articles_reform}")
+    print(f"  Unique articles mentioning Plaid Cymru: {articles_plaid}")
+    print(f"  Ratio (Plaid/Reform): {articles_plaid/articles_reform:.1f}x")
 
-        biased_sub = subset[subset["is_biased"] == 1]
-        neg_bias_rate = (biased_sub["sentiment_score"] < median_sent).mean() \
-            if len(biased_sub) > 0 else 0
-        pos_bias_rate = (biased_sub["sentiment_score"] > median_sent).mean() \
-            if len(biased_sub) > 0 else 0
+    # ===================================================================
+    # EXAMPLE REASONING
+    # ===================================================================
 
-        # Overall negative bias rate (as % of ALL mentions)
-        neg_bias_overall = (
-            (subset["is_biased"] == 1) &
-            (subset["sentiment_score"] < median_sent)
-        ).mean()
+    print("\n" + "=" * 60)
+    print("EXAMPLE LLM CLASSIFICATIONS")
+    print("=" * 60)
 
-        print(f"\n  {party} (n={n}):")
-        print(f"    Biased language rate:          {bias_pct:.1%}")
-        print(f"    General sentiment:             {sent_mean:+.3f}")
-        print(f"    Of biased sentences:")
-        print(f"      Relatively negative:         {neg_bias_rate:.1%}")
-        print(f"      Relatively positive:         {pos_bias_rate:.1%}")
-        print(f"    Overall negative bias rate:     {neg_bias_overall:.1%}")
-        print(f"      (= biased + below-median sentiment, as % of all mentions)")
+    for party in FOCUS_PARTIES:
+        on = df_on_target[df_on_target["party"] == party]
+        off = df_biased[(df_biased["party"] == party) &
+                        (df_biased["on_target"] == 0)]
+
+        print(f"\n  {party} — on-target examples:")
+        for i, (_, row) in enumerate(on.head(3).iterrows()):
+            print(f"    [{i+1}] sent={row['sentiment_score']:+.1f} "
+                  f"| {row['reasoning']}")
+            print(f"        {str(row['sentence'])[:120]}")
+
+        if len(off) > 0:
+            print(f"\n  {party} — filtered out (off-target):")
+            for i, (_, row) in enumerate(off.head(3).iterrows()):
+                print(f"    [{i+1}] {row['reasoning']}")
+                print(f"        {str(row['sentence'])[:120]}")
+
+    print("\n  Done.")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Primary analysis: Reform UK vs Plaid Cymru")
+    parser.add_argument("--bias", action="store_true",
+                        help="Run Stage 1: bias detection")
+    parser.add_argument("--llm", action="store_true",
+                        help="Run Stage 2: LLM classification")
+    parser.add_argument("--analyse", action="store_true",
+                        help="Run Stage 3: statistical analysis")
+    args = parser.parse_args()
+
+    # Default: run all stages if no flags
+    run_all = not (args.bias or args.llm or args.analyse)
+
+    if run_all or args.bias:
+        stage_bias()
+    if run_all or args.llm:
+        stage_llm()
+    if run_all or args.analyse:
+        stage_analyse()
 
 
 if __name__ == "__main__":
