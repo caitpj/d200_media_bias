@@ -109,4 +109,6 @@ ax.legend(loc='upper left', frameon=True, edgecolor='#cccccc',
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 plt.tight_layout()
 plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.pdf'), bbox_inches='tight')
+plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.png'), bbox_inches='tight')
 print("\nSaved to report/figures/sentiment_bars.pdf")
+print("Saved to report/figures/sentiment_bars.png")

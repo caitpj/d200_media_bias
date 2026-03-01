@@ -1,34 +1,94 @@
-# Does Welsh Media Need a Review? Detecting Sentiment Bias in Political Reporting Ahead of the 2026 Senedd Election
+# Does Welsh Media Need a Review?
 
-## Research Question
+**Detecting Sentiment Bias in Nation.Cymru's Political Reporting Ahead of the 2026 Senedd Election**
 
-Does Welsh online media exhibit systematic sentiment bias toward or against political parties in the run-up to the 2026 Senedd election?
+Cai Parry-Jones · D200 Machine Learning in Economics · University of Cambridge · March 2026
+
+---
 
 ## Background
 
-Ahead of the May 2026 Senedd election — widely described as the most consequential since devolution — accusations of political bias in Welsh media have come from multiple directions. This project uses NLP techniques to empirically examine whether measurable sentiment bias exists in Welsh political reporting, and whether it differs across outlets.
+The run-up to the 2026 Senedd election has seen growing accusations of political bias in Welsh media. Reform UK has [called for a review](https://www.bbc.co.uk/news/articles/cx2el7z2gypo) into the relationship between the BBC and Plaid Cymru, while a Conservative MS (later defected to Reform UK) has [raised concerns](https://nation.cymru/news/tory-ms-raises-concerns-over-impartial-media-coverage-of-senedd-election/) over the impartiality of coverage ahead of the vote. This project uses machine learning text analysis to examine political bias in Nation.Cymru, an award-winning news outlet with an accessible API archive. The key reason for this research is to determine whether a deeper bias review is required in Welsh political reporting.
 
-## Data Sources
+---
 
-Articles scraped from:
-- **BBC Wales** (bbc.co.uk/news/wales)
-- **Nation.Cymru** (nation.cymru)
-- **WalesOnline** (walesonline.co.uk)
+## TL;DR
 
-Coverage period: September 2025 – March 2026
+Nation.Cymru exhibits statistically significant differential sentiment bias across Welsh political parties. The primary analysis finds Reform UK receives on-target biased coverage at **3.4× the rate** of Plaid Cymru, with substantially more negative framing. However, the secondary analysis reveals that **Plaid Cymru is the outlier**, receiving notably more favourable coverage than all other parties across both news and opinion articles.
 
-## Method
+![Secondary analysis: mean on-target sentiment relative to article-type mean](report/figures/sentiment_bars.png)
 
-- Sentiment analysis of text surrounding political party mentions
-- Coverage volume and prominence comparison across parties and outlets
-- Named entity recognition for party/leader identification
+*Mean on-target sentiment relative to article-type baseline (news and opinion). Error bars show 95% confidence intervals.*
+
+For the full write-up, including methodology, and discussion of limitations, see [`report/final_report.tex`](report/final_report.tex).
+
+---
+
+## How It Works
+
+The pipeline has two ML stages:
+
+1. **Bias detection** — A RoBERTa model ([himel7/bias-detector](https://huggingface.co/himel7/bias-detector)) classifies whether the language surrounding each party mention is biased.
+2. **LLM sentiment attribution** — Claude Haiku 4.5 determines whether detected bias is *directed at* the named party (vs. the party merely being the speaker), assigns a sentiment score, and provides reasoning.
+
+This two-stage cascade keeps costs low while handling the nuanced speaker-vs-target distinction that simpler models struggle with.
+
+---
+
+## Repo Structure
+
+```
+├── scripts/
+│   ├── scrape.py                # Collect articles via Nation.Cymru's WordPress API
+│   ├── preprocess.py            # Extract party mentions with context windows
+│   ├── analyse.py               # Primary analysis: Reform UK vs Plaid Cymru
+│   ├── analyse_secondary.py     # Secondary analysis: 4 parties, news vs opinion
+│   ├── ml_utils.py              # Shared ML pipeline (bias detector + LLM classification)
+│   ├── visualise.py             # Generate the sentiment bar chart
+│   └── tune_context_window.py   # Context window size experiment
+├── report/
+│   └── final_report.tex         # Full project report (LaTeX)
+├── data/                        # Generated data
+└── requirements.txt
+```
+
+---
 
 ## Reproducing Results
 
+### Prerequisites
+
+- Python 3.10+
+- **An Anthropic API key**: Stage 2 uses the Claude API for sentiment attribution. You'll need to create an account and generate a key at [console.anthropic.com](https://console.anthropic.com/). Total API cost is roughly **$2** for both analyses.
+
+### Setup
+
 ```bash
 pip install -r requirements.txt
-python scripts/scrape.py
-python scripts/preprocess.py
-python scripts/analyse.py
-jupyter notebook notebook.ipynb
+export ANTHROPIC_API_KEY='your-key-here'
 ```
+
+### Run the full pipeline
+
+```bash
+# 1. Scrape articles from Nation.Cymru (~11,800 articles)
+python scripts/scrape.py
+
+# 2. Extract party mentions with context windows
+python scripts/preprocess.py
+
+# 3. Primary analysis: Reform UK vs Plaid Cymru
+python scripts/analyse.py
+
+# 4. Secondary analysis: all parties, news vs opinion
+python scripts/analyse_secondary.py
+
+# 5. Generate the bar chart figure
+python scripts/visualise.py
+```
+
+Each analysis script can also run individual stages with `--bias`, `--llm`, or `--analyse` flags. The LLM stage saves partial results, so interrupted runs can be resumed.
+
+### Note on replication
+
+LLM outputs are stochastic, exact numbers will vary slightly between runs, but replications show the overall patterns still holds.
