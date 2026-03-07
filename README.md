@@ -1,6 +1,6 @@
 # Does Welsh Media Need a Review?
 
-**Detecting Sentiment Bias in Nation.Cymru's Political Reporting Ahead of the 2026 Senedd Election**
+**Detecting Bias in Nation.Cymru’s Political Reporting**
 
 Cai Parry-Jones · D200 Machine Learning in Economics · University of Cambridge · March 2026
 
