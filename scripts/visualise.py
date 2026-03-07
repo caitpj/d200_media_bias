@@ -1,11 +1,11 @@
 """
-make_figure.py — Generate secondary analysis sentiment bar chart.
+visualise.py — Generate secondary analysis sentiment bar chart.
 
-Reads secondary_biased.csv (on-target mentions only) and plots
+Reads stage2_on_target.tsv (on-target mentions only) and plots
 mean sentiment relative to article-type mean for each party.
 
 Usage:
-    python scripts/make_figure.py
+    python scripts/visualise.py
 """
 
 import os
@@ -14,22 +14,36 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+# ---------------------------------------------------------------------------
+# Matplotlib configuration — ICML 2025 style
+#
+# Key principle: design at the exact width LaTeX will render (3.25in for
+# single-column), so \includegraphics[width=\columnwidth]{...} applies
+# no scaling.  All font sizes therefore appear 1:1 in the final PDF.
+#
+# ICML guidelines require:
+#   - figure text ≥ caption font size (9pt)
+#   - lines ≥ 0.5pt thick
+#   - vector format (PDF) for plots
+#   - high contrast, legible at print resolution
+# ---------------------------------------------------------------------------
+
 matplotlib.rcParams.update({
     'font.family': 'serif',
     'font.serif': ['Times New Roman', 'DejaVu Serif'],
-    'font.size': 9,
+    'font.size': 10,
     'axes.labelsize': 10,
     'axes.titlesize': 10,
     'xtick.labelsize': 9,
-    'ytick.labelsize': 8,
-    'legend.fontsize': 8,
+    'ytick.labelsize': 9,
+    'legend.fontsize': 8.5,
     'figure.dpi': 300,
     'savefig.dpi': 300,
-    'axes.linewidth': 0.5,
-    'xtick.major.width': 0.5,
-    'ytick.major.width': 0.5,
-    'xtick.major.size': 3,
-    'ytick.major.size': 3,
+    'axes.linewidth': 0.6,
+    'xtick.major.width': 0.6,
+    'ytick.major.width': 0.6,
+    'xtick.major.size': 3.5,
+    'ytick.major.size': 3.5,
 })
 
 # ---------------------------------------------------------------------------
@@ -37,13 +51,13 @@ matplotlib.rcParams.update({
 # ---------------------------------------------------------------------------
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data",
-                         "secondary", "secondary_biased.csv")
+                         "secondary", "stage2_on_target.tsv")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "report", "figures")
 
-df = pd.read_csv(DATA_PATH)
+df = pd.read_csv(DATA_PATH, sep="\t")
 
 parties_order = ['reform_uk', 'conservative', 'labour', 'plaid_cymru']
-party_labels = ['Reform UK', 'Conservative', 'Labour', 'Plaid Cymru']
+party_labels = ['Reform UK', 'Tory', 'Labour', 'Plaid Cymru']
 
 # ---------------------------------------------------------------------------
 # Compute article-type baselines and deviations
@@ -70,26 +84,29 @@ for party in parties_order:
 
         dev_list.append(deviation)
         ci_list.append(ci)
-        print(f"  {party:15s} {atype:8s}  n={n:3d}  dev={deviation:+.3f}  ci={ci:.3f}")
+        print(f"  {party:15s} {atype:8s}  n={n:3d}  "
+              f"dev={deviation:+.3f}  ci={ci:.3f}")
 
 # ---------------------------------------------------------------------------
-# Plot
+# Plot — sized to ICML single-column width (3.25in)
 # ---------------------------------------------------------------------------
 
 x = np.arange(len(parties_order))
-width = 0.32
+width = 0.35
 
-fig, ax = plt.subplots(figsize=(5.5, 3.2))
+fig, ax = plt.subplots(figsize=(3.25, 2.5))
 
-bars1 = ax.bar(x - width/2, news_dev, width, label='News',
+bars1 = ax.bar(x - width / 2, news_dev, width, label='News',
                color='#6a6a6a', edgecolor='black', linewidth=0.4,
                yerr=news_ci, capsize=2.5,
-               error_kw={'elinewidth': 0.8, 'capthick': 0.8, 'color': 'black'})
-bars2 = ax.bar(x + width/2, opin_dev, width, label='Opinion',
+               error_kw={'elinewidth': 0.8, 'capthick': 0.8,
+                         'color': 'black'})
+bars2 = ax.bar(x + width / 2, opin_dev, width, label='Opinion',
                color='#b8b8b8', edgecolor='black', linewidth=0.4,
                hatch='///',
                yerr=opin_ci, capsize=2.5,
-               error_kw={'elinewidth': 0.8, 'capthick': 0.8, 'color': 'black'})
+               error_kw={'elinewidth': 0.8, 'capthick': 0.8,
+                         'color': 'black'})
 
 ax.axhline(y=0, color='black', linewidth=0.8)
 ax.set_ylabel('Relative sentiment')
@@ -108,7 +125,9 @@ ax.legend(loc='upper left', frameon=True, edgecolor='#cccccc',
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 plt.tight_layout()
-plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.pdf'), bbox_inches='tight')
-plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.png'), bbox_inches='tight')
-print("\nSaved to report/figures/sentiment_bars.pdf")
-print("Saved to report/figures/sentiment_bars.png")
+plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.pdf'),
+            bbox_inches='tight')
+plt.savefig(os.path.join(OUTPUT_DIR, 'sentiment_bars.png'),
+            bbox_inches='tight')
+print(f"\nSaved to {OUTPUT_DIR}/sentiment_bars.pdf")
+print(f"Saved to {OUTPUT_DIR}/sentiment_bars.png")

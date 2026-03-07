@@ -3,7 +3,7 @@ analyse_secondary.py — SECONDARY ANALYSIS: All parties, news vs opinion.
 
 Pipeline:
   Stage 1: Bias detection on all mentions (himel7/bias-detector)
-  Stage 2: LLM classification on sampled biased mentions (Claude Haiku 4.5)
+  Stage 2: LLM classification on sampled biased mentions (Claude Sonnet 4.6)
   Stage 3: Statistical analysis comparing parties and article types
 
 To limit API costs, Stage 2 samples up to LLM_MAX_PER_GROUP biased
@@ -23,6 +23,7 @@ Usage:
 
 import os
 import sys
+import json
 import argparse
 
 import pandas as pd
@@ -40,7 +41,7 @@ from ml_utils import (
 # ---------------------------------------------------------------------------
 
 MENTIONS_PATH = os.path.join(os.path.dirname(__file__), "..", "data",
-                             "processed", "party_mentions.csv")
+                             "processed", "party_mentions.tsv")
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "secondary")
 
 ALL_PARTIES = ["reform_uk", "plaid_cymru", "labour", "conservative"]
@@ -61,22 +62,31 @@ def stage_bias():
 
     print("=" * 60)
     print("SECONDARY STAGE 1: BIAS DETECTION")
-    print(f"  4 parties, {MIN_YEAR}+, news + opinion, editorial voice")
+    print(f"  4 parties, {MIN_YEAR}+, news + opinion")
     print("=" * 60)
 
     print("\nLoading mentions...")
-    df = pd.read_csv(MENTIONS_PATH)
+    df = pd.read_csv(MENTIONS_PATH, sep="\t")
     df["publish_date"] = pd.to_datetime(df["publish_date"], errors="coerce")
     df["year"] = df["publish_date"].dt.year
     df["article_type"] = df["url"].apply(get_article_type)
 
+    # Record total counts BEFORE bias detection (denominators for analysis)
+    pre_counts = {}
+    for party in ALL_PARTIES:
+        for atype in ["news", "opinion"]:
+            n = int(((df["party"] == party) &
+                     (df["year"] >= MIN_YEAR) &
+                     (df["article_type"] == atype)).sum())
+            pre_counts[f"{party}_{atype}"] = n
+
     df = df[
         (df["party"].isin(ALL_PARTIES)) &
         (df["year"] >= MIN_YEAR) &
-        (df["article_type"].isin(["news", "opinion"])) &
-        (df["is_quote"] == False)
+        (df["article_type"].isin(["news", "opinion"]))
     ].copy()
 
+    pre_counts["total"] = int(len(df))
     print(f"  {len(df)} mentions after filtering")
     print(f"\n  By party:")
     for party in ALL_PARTIES:
@@ -88,25 +98,41 @@ def stage_bias():
         print(f"    {atype}: {n}")
 
     device = get_device()
-    df_all, df_biased = run_bias_pipeline(df, device)
+    # run_bias_pipeline returns (df_biased, counts)
+    # counts has per-party {mentions, articles, biased} but not by article_type
+    df_biased, _ = run_bias_pipeline(df, device)
 
-    df_all.to_csv(os.path.join(OUTPUT_DIR, "secondary_all.csv"), index=False)
-    print(f"  Saved: secondary_all.csv")
+    # Build detailed counts with article_type breakdown
+    for party in ALL_PARTIES:
+        for atype in ["news", "opinion"]:
+            sub = df_biased[(df_biased["party"] == party) &
+                            (df_biased["article_type"] == atype)]
+            pre_counts[f"{party}_{atype}_biased"] = int(len(sub))
+
+    # Save counts JSON
+    counts_path = os.path.join(OUTPUT_DIR, "stage1_counts.json")
+    with open(counts_path, "w") as f:
+        json.dump(pre_counts, f, indent=2)
+    print(f"  Saved: {counts_path}")
+
+    # Save biased mentions
+    biased_path = os.path.join(OUTPUT_DIR, "stage1_biased.tsv")
+    df_biased.to_csv(biased_path, sep="\t", index=False)
+    print(f"  Saved: {biased_path} ({len(df_biased)} biased mentions)")
 
     # Bias rates
-    print("\n  Bias rates by party × article type:")
+    print("\n  Bias rates by party x article type:")
     print(f"  {'Party':<16s} {'news':>12s} {'opinion':>12s}")
     print(f"  {'-'*42}")
     for party in ALL_PARTIES:
         parts = []
         for atype in ["news", "opinion"]:
-            sub = df_all[(df_all["party"] == party) &
-                         (df_all["article_type"] == atype)]
-            if len(sub) == 0:
+            n_total = pre_counts[f"{party}_{atype}"]
+            n_b = pre_counts[f"{party}_{atype}_biased"]
+            if n_total == 0:
                 parts.append(f"{'n/a':>12s}")
             else:
-                rate = sub["is_biased"].mean()
-                n_b = sub["is_biased"].sum()
+                rate = n_b / n_total
                 parts.append(f"{n_b:>4d} ({rate:>5.1%})")
         print(f"  {party:<16s} {''.join(parts)}")
 
@@ -121,16 +147,15 @@ def stage_llm():
     print(f"  Max {LLM_MAX_PER_GROUP} per party per article type")
     print("=" * 60)
 
-    all_path = os.path.join(OUTPUT_DIR, "secondary_all.csv")
-    if not os.path.exists(all_path):
-        print(f"  ERROR: {all_path} not found. Run --bias first.")
+    biased_path = os.path.join(OUTPUT_DIR, "stage1_biased.tsv")
+    if not os.path.exists(biased_path):
+        print(f"  ERROR: {biased_path} not found. Run --bias first.")
         return
 
-    df_all = pd.read_csv(all_path)
-    df_biased = df_all[df_all["is_biased"] == 1].copy()
+    df_biased = pd.read_csv(biased_path, sep="\t")
     print(f"  {len(df_biased)} total biased mentions")
 
-    # Sample up to LLM_MAX_PER_GROUP per party × article_type
+    # Sample up to LLM_MAX_PER_GROUP per party x article_type
     sampled = []
     print(f"\n  Sampling for LLM:")
     for party in ALL_PARTIES:
@@ -152,7 +177,7 @@ def stage_llm():
 
     # Save the sampled biased mentions (pre-LLM)
     df_sampled.to_csv(
-        os.path.join(OUTPUT_DIR, "biased_sampled.csv"), index=False)
+        os.path.join(OUTPUT_DIR, "stage2_sampled.tsv"), sep="\t", index=False)
 
     results_df = run_llm_classification(df_sampled, OUTPUT_DIR)
     df_merged = merge_llm_results(df_sampled, results_df)
@@ -163,9 +188,10 @@ def stage_llm():
     print(f"  Off-target: {n_off} ({n_off/len(df_merged):.1%})")
 
     df_on_target.to_csv(
-        os.path.join(OUTPUT_DIR, "secondary_biased.csv"), index=False)
+        os.path.join(OUTPUT_DIR, "stage2_on_target.tsv"), sep="\t",
+        index=False)
     df_merged.to_csv(
-        os.path.join(OUTPUT_DIR, "biased_with_llm.csv"), index=False)
+        os.path.join(OUTPUT_DIR, "stage2_all.tsv"), sep="\t", index=False)
 
 
 # ---------------------------------------------------------------------------
@@ -177,27 +203,31 @@ def stage_analyse():
     print("SECONDARY STAGE 3: ANALYSIS")
     print("=" * 60)
 
-    all_path = os.path.join(OUTPUT_DIR, "secondary_all.csv")
-    llm_path = os.path.join(OUTPUT_DIR, "llm_results.csv")
-    sampled_path = os.path.join(OUTPUT_DIR, "biased_sampled.csv")
+    counts_path = os.path.join(OUTPUT_DIR, "stage1_counts.json")
+    llm_path = os.path.join(OUTPUT_DIR, "stage2_llm_raw.tsv")
+    sampled_path = os.path.join(OUTPUT_DIR, "stage2_sampled.tsv")
 
-    if not os.path.exists(all_path):
-        print(f"  ERROR: {all_path} not found. Run --bias first.")
+    if not os.path.exists(counts_path):
+        print(f"  ERROR: {counts_path} not found. Run --bias first.")
         return
     if not os.path.exists(llm_path):
         print(f"  ERROR: {llm_path} not found. Run --llm first.")
         return
 
-    df_all = pd.read_csv(all_path)
-    df_sampled = pd.read_csv(sampled_path)
-    df_biased = merge_llm_results(df_sampled, pd.read_csv(llm_path))
+    with open(counts_path) as f:
+        counts = json.load(f)
+
+    df_sampled = pd.read_csv(sampled_path, sep="\t")
+    df_llm = pd.read_csv(llm_path, sep="\t")
+    df_biased = merge_llm_results(df_sampled, df_llm)
     df_on_target = df_biased[df_biased["on_target"] == 1].copy()
 
     # Save updated
     df_on_target.to_csv(
-        os.path.join(OUTPUT_DIR, "secondary_biased.csv"), index=False)
+        os.path.join(OUTPUT_DIR, "stage2_on_target.tsv"), sep="\t",
+        index=False)
     df_biased.to_csv(
-        os.path.join(OUTPUT_DIR, "biased_with_llm.csv"), index=False)
+        os.path.join(OUTPUT_DIR, "stage2_all.tsv"), sep="\t", index=False)
 
     # ===================================================================
     # ALL PARTIES SUMMARY
@@ -255,7 +285,7 @@ def stage_analyse():
                   f"{on_pct:>6.1%} {sent:>+7.3f} {neg:>6.1%} {pos:>6.1%}")
 
     # ===================================================================
-    # BIAS RATES FROM FULL DATA (not sampled)
+    # BIAS DETECTION RATES FROM COUNTS JSON
     # ===================================================================
 
     print("\n" + "=" * 60)
@@ -269,18 +299,17 @@ def stage_analyse():
     for party in ALL_PARTIES:
         parts = []
         for atype in ["news", "opinion"]:
-            sub = df_all[(df_all["party"] == party) &
-                         (df_all["article_type"] == atype)]
-            if len(sub) == 0:
-                parts.extend(["n/a", "n/a"])
+            n_total = counts.get(f"{party}_{atype}", 0)
+            n_b = counts.get(f"{party}_{atype}_biased", 0)
+            if n_total == 0:
+                parts.extend(["     n/a", "    n/a"])
             else:
-                n_b = sub["is_biased"].sum()
-                rate = sub["is_biased"].mean()
+                rate = n_b / n_total
                 parts.extend([f"{n_b:>8d}", f"{rate:>7.1%}"])
         print(f"  {party:<16s} {parts[0]} {parts[1]} {parts[2]} {parts[3]}")
 
     # ===================================================================
-    # CHI-SQUARED ON BIAS RATES
+    # CHI-SQUARED ON BIAS RATES (from counts JSON)
     # ===================================================================
 
     print("\n" + "=" * 60)
@@ -288,19 +317,28 @@ def stage_analyse():
     print("=" * 60)
 
     for atype in ["news", "opinion"]:
-        at = df_all[df_all["article_type"] == atype]
-        if len(at) == 0:
+        rows = []
+        for party in ALL_PARTIES:
+            n_total = counts.get(f"{party}_{atype}", 0)
+            n_b = counts.get(f"{party}_{atype}_biased", 0)
+            if n_total == 0:
+                continue
+            rows.append({
+                "party": party,
+                "biased": n_b,
+                "non-biased": n_total - n_b,
+            })
+        if len(rows) < 2:
             continue
-        contingency = pd.crosstab(at["party"], at["bias_label"])
-        if contingency.shape[0] < 2 or contingency.shape[1] < 2:
-            continue
+
+        contingency = pd.DataFrame(rows).set_index("party")
         chi2, p_chi2, dof, _ = stats.chi2_contingency(contingency)
-        n_total = len(at)
+        n_total = contingency.sum().sum()
         cramers_v = np.sqrt(chi2 / (n_total * (min(contingency.shape) - 1)))
 
         print(f"\n  Chi-squared — {atype} bias rate across parties:")
-        print(f"    χ² = {chi2:.1f}, df = {dof}, p = {p_chi2:.4f}")
-        print(f"    Cramér's V = {cramers_v:.3f}")
+        print(f"    chi2 = {chi2:.1f}, df = {dof}, p = {p_chi2:.4f}")
+        print(f"    Cramer's V = {cramers_v:.3f}")
 
     # ===================================================================
     # SENTIMENT STRENGTH BREAKDOWN
@@ -310,12 +348,13 @@ def stage_analyse():
     print("SENTIMENT STRENGTH BREAKDOWN (on-target)")
     print("=" * 60)
 
+    # Discrete scale: {-1.0, -0.5, 0.0, +0.5, +1.0}
     bins = [
-        ("Strong negative", -1.01, -0.75),
-        ("Moderate negative", -0.75, -0.0),
-        ("Neutral/weak", -0.0, 0.0),
-        ("Moderate positive", 0.0, 0.75),
-        ("Strong positive", 0.75, 1.01),
+        ("Strong negative",   lambda s: s <= -0.75),
+        ("Moderate negative",  lambda s: (s > -0.75) & (s < 0)),
+        ("Neutral",            lambda s: s == 0.0),
+        ("Moderate positive",  lambda s: (s > 0) & (s < 0.75)),
+        ("Strong positive",    lambda s: s >= 0.75),
     ]
 
     print(f"\n  {'':20s}", end="")
@@ -324,18 +363,14 @@ def stage_analyse():
     print()
     print(f"  {'-'*78}")
 
-    for label, lo, hi in bins:
+    for label, cond in bins:
         print(f"  {label:20s}", end="")
         for party in ALL_PARTIES:
             subset = df_on_target[df_on_target["party"] == party]
             if len(subset) == 0:
                 print(f"  {'n/a':>14s}", end="")
                 continue
-            if label == "Neutral/weak":
-                count = (subset["sentiment_score"] == 0).sum()
-            else:
-                count = ((subset["sentiment_score"] > lo) &
-                         (subset["sentiment_score"] <= hi)).sum()
+            count = cond(subset["sentiment_score"]).sum()
             pct = count / len(subset)
             print(f"  {count:>4d} ({pct:>5.1%})", end="")
         print()

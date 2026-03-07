@@ -4,7 +4,7 @@ ml_utils.py — Shared model loading, scoring, and preprocessing utilities.
 Two-stage pipeline:
   1. Bias detection — is the language biased? (himel7/bias-detector)
   2. LLM classification — entity-level sentiment attribution via Claude
-     Haiku 4.5 (Anthropic API)
+     Sonnet 4.6 (Anthropic API)
 
 Used by analyse.py (primary) and analyse_secondary.py.
 """
@@ -14,7 +14,6 @@ import time
 import json
 
 import pandas as pd
-import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
@@ -29,45 +28,46 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 BIAS_MODEL = "himel7/bias-detector"
-LLM_MODEL = "claude-haiku-4-5-20251001"
+LLM_MODEL = "claude-sonnet-4-6"
 MAX_LENGTH = 512
 BATCH_SIZE = 16
 
 # How many mentions to send per API call
-LLM_BATCH_SIZE = 100
+LLM_BATCH_SIZE = 50
 
-LLM_SYSTEM_PROMPT = """You are classifying media bias in news articles about Welsh political parties.
+LLM_SYSTEM_PROMPT = """You are a media bias annotator. For each row, assess whether the text evaluates or judges the party named in "ASSESS BIAS TOWARD".
 
-For each row, determine:
+STEP 1 — TARGET ATTRIBUTION (on_target):
+Does the text evaluate, judge, or characterise the named party?
+  1 = The party's actions, policies, character, or competence are being assessed.
+  0 = The party is merely speaking, being quoted, mentioned in passing, or the judgment targets someone/something else.
 
-1. on_target (1 or 0): Is the bias ABOUT the named party?
-   - 1 = The text portrays the party positively or negatively (the party is the subject being judged)
-   - 0 = The party is merely speaking, being quoted, or mentioned in passing — the bias is about something/someone else
-   
-   Examples:
-   - "Plaid Cymru criticised the devastating policy" → 0 (Plaid is the SPEAKER)
-   - "Plaid Cymru set out clear proposals but Labour ignored them" → 0 (negativity targets Labour)
-   - "Reform UK's dangerous populist agenda" → 1 (Reform IS the target)
-   - "Plaid Cymru's unrealistic independence plans" → 1 (Plaid IS the target)
+STEP 2 — SENTIMENT (sentiment_score):
+If on_target = 1, how is the party portrayed? Use ONLY one of these five values:
+  -1.0 = Strongly negative (e.g. party described as dangerous, extremist, incompetent)
+  -0.5 = Moderately negative (e.g. party criticised, framed unfavourably, failed)
+   0.0 = Neutral
+  +0.5 = Moderately positive (e.g. party praised, framed favourably, succeeded)
+  +1.0 = Strongly positive (e.g. party described as visionary, highly effective)
+If on_target = 0, sentiment_score must be 0.0.
 
-2. sentiment_score (number from -1.0 to +1.0): If on_target = 1, how is the party portrayed?
-   - -1.0 = Strongly negative
-   - -0.5 = Moderately negative
-   -  0.0 = Neutral or off-target
-   - +0.5 = Moderately positive
-   - +1.0 = Strongly positive
-
-3. reasoning: One short sentence explaining your decision.
+EXAMPLES:
+- ASSESS: Plaid | "Plaid Cymru criticised the devastating policy" → on_target=0 (Plaid is speaking, not being judged)
+- ASSESS: Reform | "Reform UK's dangerous populist agenda threatens Wales" → on_target=1, sentiment_score=-1.0 (Reform characterised as dangerous)
+- ASSESS: Plaid | "Plaid Cymru's unrealistic independence plans" → on_target=1, sentiment_score=-0.5 (Plaid's policy judged negatively)
+- ASSESS: Reform | "Reform UK failed to win any seats in the region" → on_target=1, sentiment_score=-0.5 (negative factual framing)
+- ASSESS: Plaid | "Experts praised Plaid's innovative housing strategy" → on_target=1, sentiment_score=+0.5 (positive third-party assessment)
+- ASSESS: Reform | "Labour attacked Reform's record on healthcare" → on_target=1, sentiment_score=-0.5 (Reform's record judged negatively)
+- ASSESS: Labour | "Labour attacked Reform's record on healthcare" → on_target=0 (Labour is the speaker, not being judged)
+- ASSESS: Plaid | "Plaid set out clear proposals but Labour ignored them" → on_target=0 (negativity targets Labour, not Plaid)
 
 RULES:
-- CRITICAL: Assess bias ONLY toward the party named in "ASSESS BIAS TOWARD". If the text praises Party A while criticising Party B, and you are assessing Party B, that is negative toward Party B (on_target=1, negative score). Do not describe how other parties are portrayed.
-- Use the "context" for your assessment, not just the "sentence"
-- Quoted speech (is_quote = True) usually means the party is speaking — likely on_target = 0
-- If the party is criticising something else, that is NOT on_target
-- Before returning, review each classification: if your reasoning says the party is NOT being judged, on_target must be 0 and sentiment_score must be 0.0. Fix any contradictions.
+- Assess ONLY the party named in "ASSESS BIAS TOWARD". If text criticises Party A while praising Party B, and you are assessing Party A, that is negative toward Party A.
+- Use the full "context" field, not just "sentence".
+- Write your reasoning BEFORE deciding on_target and sentiment_score. If your reasoning concludes the party is not being judged, on_target must be 0.
 
-Respond ONLY with a JSON array. No other text. Example:
-[{"id": 0, "on_target": 1, "sentiment_score": -0.5, "reasoning": "Reform portrayed as ineffective"},{"id": 1, "on_target": 0, "sentiment_score": 0.0, "reasoning": "Plaid is the speaker, not the target"}]"""
+OUTPUT: JSON array only. No other text. Put reasoning first in each object.
+[{"id": 0, "reasoning": "Reform characterised as dangerous", "on_target": 1, "sentiment_score": -1.0}, {"id": 1, "reasoning": "Plaid is speaking, not being judged", "on_target": 0, "sentiment_score": 0.0}]"""
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +103,10 @@ def get_article_type(url):
 # Batch scoring (bias detector)
 # ---------------------------------------------------------------------------
 
-def score_batch(texts, tokenizer, model, device, text_pairs=None):
+def score_batch(texts, tokenizer, model, device):
     """Score a batch of texts. Returns softmax probabilities."""
     encodings = tokenizer(
         texts,
-        text_pair=text_pairs,
         padding=True,
         truncation=True,
         max_length=MAX_LENGTH,
@@ -133,7 +132,7 @@ def run_bias_detector(df, device):
     print(f"  Running on {len(df)} mentions")
     print("=" * 60)
 
-    tokenizer = AutoTokenizer.from_pretrained(BIAS_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained("roberta-base")
     model = AutoModelForSequenceClassification.from_pretrained(BIAS_MODEL)
     model.to(device)
     model.eval()
@@ -155,8 +154,8 @@ def run_bias_detector(df, device):
         for i in range(len(texts)):
             scores = probs[i]
             pred_idx = int(scores.argmax())
-            pred_label = id2label[pred_idx]
-            is_biased = pred_label.lower() in ("biased", "bias", "label_1", "1")
+            # Model card: LABEL_1 = biased, LABEL_0 = non-biased
+            is_biased = pred_idx == 1
 
             all_results.append({
                 "bias_label": "biased" if is_biased else "non-biased",
@@ -187,7 +186,7 @@ def run_bias_detector(df, device):
 def run_bias_pipeline(df, device):
     """
     Run Stage 1 (bias detection) and return results.
-    Returns (df_all, df_biased_raw).
+    Returns (df_biased, counts) where counts is a dict of per-party totals.
     """
     bias_results = run_bias_detector(df, device)
 
@@ -196,26 +195,34 @@ def run_bias_pipeline(df, device):
         bias_results,
     ], axis=1)
 
-    df_all["publish_date"] = pd.to_datetime(df_all["publish_date"],
-                                             errors="coerce")
-    df_all["year"] = df_all["publish_date"].dt.year
     df_all["is_biased"] = (df_all["bias_label"] == "biased").astype(int)
-    df_all["article_type"] = df_all["url"].apply(get_article_type)
+
+    # Build counts dict for coverage bias / z-test denominators
+    counts = {}
+    for party in df_all["party"].unique():
+        subset = df_all[df_all["party"] == party]
+        counts[party] = {
+            "mentions": len(subset),
+            "articles": subset["url"].nunique(),
+            "biased": int(subset["is_biased"].sum()),
+        }
 
     df_biased = df_all[df_all["is_biased"] == 1].copy()
     print(f"\n  {len(df_biased)} biased mentions "
           f"({len(df_biased)/len(df_all):.1%} of total)")
 
-    return df_all, df_biased
+    return df_biased, counts
 
 
 # ---------------------------------------------------------------------------
 # Stage 2: LLM classification via Anthropic API
 # ---------------------------------------------------------------------------
 
-def run_llm_classification(df_biased, output_dir):
+def run_llm_classification(df_biased, output_dir,
+                           results_filename="stage2_llm_raw.tsv",
+                           partial_filename="stage2_llm_partial.json"):
     """
-    Classify biased mentions using Claude Haiku 4.5 via the Anthropic API.
+    Classify biased mentions using Claude Sonnet 4.6 via the Anthropic API.
     Processes in batches, saves intermediate results, and handles retries.
 
     Returns DataFrame with on_target, sentiment_score, reasoning columns.
@@ -245,7 +252,7 @@ def run_llm_classification(df_biased, output_dir):
     df_biased["id"] = range(len(df_biased))
 
     # Check for existing partial results
-    partial_path = os.path.join(output_dir, "llm_partial_results.json")
+    partial_path = os.path.join(output_dir, partial_filename)
     completed = {}
     if os.path.exists(partial_path):
         with open(partial_path, "r") as f:
@@ -262,18 +269,13 @@ def run_llm_classification(df_biased, output_dir):
 
     start_time = time.time()
 
-    for batch_idx in range(n_batches):
-        batch_start = batch_idx * LLM_BATCH_SIZE
-        batch_end = min(batch_start + LLM_BATCH_SIZE, len(remaining))
-        batch = remaining.iloc[batch_start:batch_end]
-
-        # Build the user message with the batch data
+    def _call_and_parse(batch_df):
+        """Send a batch to the API and parse. Returns list of results or None."""
         rows_text = []
-        for _, row in batch.iterrows():
+        for _, row in batch_df.iterrows():
             rows_text.append(
                 f"id: {row['id']}\n"
                 f"ASSESS BIAS TOWARD: {row['party']}\n"
-                f"is_quote: {row['is_quote']}\n"
                 f"sentence: {row['sentence']}\n"
                 f"context: {row['context']}"
             )
@@ -283,7 +285,7 @@ def run_llm_classification(df_biased, output_dir):
                     "Respond with ONLY a JSON array.\n\n"
                     + "\n---\n".join(rows_text))
 
-        # API call with retry
+        response = None
         for attempt in range(3):
             try:
                 response = client.messages.create(
@@ -291,6 +293,7 @@ def run_llm_classification(df_biased, output_dir):
                     max_tokens=16384,
                     system=LLM_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_msg}],
+                    thinking={"type": "disabled"},
                 )
                 break
             except Exception as e:
@@ -299,36 +302,64 @@ def run_llm_classification(df_biased, output_dir):
                     print(f"    Retry {attempt+1} after error: {e}")
                     time.sleep(wait)
                 else:
-                    print(f"    FAILED batch {batch_idx+1}: {e}")
-                    continue
+                    print(f"    FAILED API call: {e}")
 
-        # Parse response
+        if response is None:
+            return None
+
         response_text = response.content[0].text.strip()
+
+        if response.stop_reason == "max_tokens":
+            print(f"    Truncated (hit max_tokens), {len(batch_df)} rows")
+
         # Clean potential markdown wrapping
         if response_text.startswith("```"):
             response_text = response_text.split("\n", 1)[1]
             response_text = response_text.rsplit("```", 1)[0]
 
         try:
-            batch_results = json.loads(response_text)
+            return json.loads(response_text)
         except json.JSONDecodeError:
-            # Try to salvage truncated JSON by finding last complete object
-            last_brace = response_text.rfind("}")
-            if last_brace > 0:
-                truncated = response_text[:last_brace + 1] + "]"
+            # Try to salvage truncated JSON
+            search_from = len(response_text) - 1
+            for _ in range(50):
+                pos = response_text.rfind("}", 0, search_from)
+                if pos <= 0:
+                    break
+                candidate = response_text[:pos + 1] + "]"
                 try:
-                    batch_results = json.loads(truncated)
-                    print(f"    Recovered {len(batch_results)} from truncated "
-                          f"batch {batch_idx+1}")
+                    results = json.loads(candidate)
+                    print(f"    Recovered {len(results)} from truncated batch")
+                    return results
                 except json.JSONDecodeError:
-                    print(f"    WARNING: Failed to parse batch {batch_idx+1}")
-                    print(f"    First 200 chars: {response_text[:200]}")
-                    continue
-            else:
-                print(f"    WARNING: Failed to parse batch {batch_idx+1}")
-                print(f"    First 200 chars: {response_text[:200]}")
-                continue
+                    search_from = pos
+            return None
 
+    def _classify_with_retry(batch_df, depth=0):
+        """Classify a batch; on failure, split in half and retry."""
+        results = _call_and_parse(batch_df)
+        if results is not None:
+            return results
+
+        # Give up on single rows
+        if len(batch_df) <= 1:
+            print(f"    Giving up on id={batch_df.iloc[0]['id']}")
+            return []
+
+        # Split in half and retry
+        mid = len(batch_df) // 2
+        print(f"    Split failed batch ({len(batch_df)} rows) "
+              f"into {mid} + {len(batch_df) - mid}")
+        left = _classify_with_retry(batch_df.iloc[:mid], depth + 1)
+        right = _classify_with_retry(batch_df.iloc[mid:], depth + 1)
+        return left + right
+
+    for batch_idx in range(n_batches):
+        batch_start = batch_idx * LLM_BATCH_SIZE
+        batch_end = min(batch_start + LLM_BATCH_SIZE, len(remaining))
+        batch = remaining.iloc[batch_start:batch_end]
+
+        batch_results = _classify_with_retry(batch)
         all_results.extend(batch_results)
 
         # Save partial results
@@ -345,6 +376,24 @@ def run_llm_classification(df_biased, output_dir):
     elapsed = time.time() - start_time
     print(f"\n  Done. {len(all_results)} classifications in {elapsed:.0f}s")
 
+    # Check for missing IDs and retry them
+    classified_ids = {r["id"] for r in all_results}
+    expected_ids = set(df_biased["id"].tolist())
+    missing_ids = expected_ids - classified_ids
+    if missing_ids:
+        print(f"\n  Retrying {len(missing_ids)} missing IDs...")
+        missing_df = df_biased[df_biased["id"].isin(missing_ids)]
+        retry_results = _classify_with_retry(missing_df)
+        all_results.extend(retry_results)
+        with open(partial_path, "w") as f:
+            json.dump(all_results, f)
+        still_missing = expected_ids - {r["id"] for r in all_results}
+        if still_missing:
+            print(f"  WARNING: {len(still_missing)} IDs still missing "
+                  f"after retry: {sorted(still_missing)[:20]}")
+        else:
+            print(f"  All {len(expected_ids)} IDs classified.")
+
     # Convert to DataFrame
     results_df = pd.DataFrame(all_results)
     results_df["id"] = results_df["id"].astype(int)
@@ -354,8 +403,8 @@ def run_llm_classification(df_biased, output_dir):
         results_df["reasoning"] = ""
 
     # Save final results
-    results_path = os.path.join(output_dir, "llm_results.csv")
-    results_df.to_csv(results_path, index=False)
+    results_path = os.path.join(output_dir, results_filename)
+    results_df.to_csv(results_path, index=False, sep="\t")
     print(f"  Saved: {results_path}")
 
     # Clean up partial
@@ -388,9 +437,5 @@ def merge_llm_results(df_biased, results_df):
     print(f"  Off-target (filtered): {n_off_target}")
     if n_missing > 0:
         print(f"  WARNING: {n_missing} mentions without LLM classification")
-
-    df_merged["weighted_bias_score"] = (
-        df_merged["bias_confidence"] * df_merged["sentiment_score"]
-    )
 
     return df_merged

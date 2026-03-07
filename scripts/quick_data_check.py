@@ -1,6 +1,6 @@
 """
 Quick script to get the TODO numbers for the report.
-Run from the project root: python get_report_numbers.py
+Run from the project root: python scripts/quick_data_check.py
 """
 import json
 import pandas as pd
@@ -11,7 +11,7 @@ with open("data/raw/nation_cymru_articles.json") as f:
 print(f"Total articles: {len(articles)}")
 
 # --- 2 & 3. Mention counts ---
-df = pd.read_csv("data/processed/party_mentions.csv")
+df = pd.read_csv("data/processed/party_mentions.tsv", sep="\t")
 df["publish_date"] = pd.to_datetime(df["publish_date"], errors="coerce")
 df["year"] = df["publish_date"].dt.year
 
@@ -23,19 +23,18 @@ def get_article_type(url):
 
 df["article_type"] = df["url"].apply(get_article_type)
 
-# Primary: Reform + Plaid, 2022+, news, editorial voice
+# Primary: Reform + Plaid, 2022+, news
 primary = df[
     (df["party"].isin(["reform_uk", "plaid_cymru"])) &
     (df["year"] >= 2022) &
-    (df["article_type"] == "news") &
-    (df["is_quote"] == False)
+    (df["article_type"] == "news")
 ]
-print(f"\nPrimary (Reform+Plaid, 2022-2026, news, editorial voice):")
+print(f"\nPrimary (Reform+Plaid, 2022-2026, news):")
 print(f"  Total: {len(primary)}")
 print(f"  Reform UK: {(primary['party'] == 'reform_uk').sum()}")
 print(f"  Plaid Cymru: {(primary['party'] == 'plaid_cymru').sum()}")
 
-# Secondary: 4 parties, 2022+, news + opinion (all voice types)
+# Secondary: 4 parties, 2022+, news + opinion
 secondary = df[
     (df["party"].isin(["reform_uk", "plaid_cymru", "labour", "conservative"])) &
     (df["year"] >= 2022) &

@@ -25,7 +25,10 @@ RAW_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "raw",
 PROCESSED_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "processed")
 
 # Context window: sentences either side of a mention
-CONTEXT_WINDOW = 2
+CONTEXT_WINDOW = 1
+
+# Skip captions and fragments shorter than this
+MIN_SENTENCE_LENGTH = 30
 
 # ---------------------------------------------------------------------------
 # Party definitions
@@ -69,13 +72,14 @@ def split_sentences(text: str) -> list[str]:
 
 def extract_mentions(sentences: list[str]) -> list[dict]:
     """
-    Find all party mentions. For each, extract a context window
-    and flag whether it's inside quotation marks.
+    Find all party mentions. For each, extract a context window.
     """
     mentions = []
 
     for party, config in PARTIES.items():
         for sent_idx, sentence in enumerate(sentences):
+            if len(sentence) < MIN_SENTENCE_LENGTH:
+                continue
             for term in config["terms"]:
                 pos = sentence.find(term)
                 if pos == -1:
@@ -86,20 +90,12 @@ def extract_mentions(sentences: list[str]) -> list[dict]:
                 end = min(len(sentences), sent_idx + CONTEXT_WINDOW + 1)
                 context = " ".join(sentences[start:end])
 
-                # Quote detection
-                before = sentence[:pos]
-                open_q = before.count('"') + before.count('\u201c')
-                close_q = before.count('"') + before.count('\u201d')
-                is_quote = open_q > close_q
-
                 mentions.append({
                     "party": party,
                     "group": config["group"],
                     "match": term,
                     "sentence": sentence,
                     "context": context,
-                    "is_quote": is_quote,
-                    "sentence_idx": sent_idx,
                 })
                 break  # one match per party per sentence
 
@@ -141,7 +137,6 @@ def main():
     df = pd.DataFrame(rows)
     df["publish_date"] = pd.to_datetime(df["publish_date"], errors="coerce")
     df["year"] = df["publish_date"].dt.year
-    df["year_month"] = df["publish_date"].dt.to_period("M")
 
     # Summary
     print(f"\n  Total mentions: {len(df)}")
@@ -151,30 +146,11 @@ def main():
     print(df["group"].value_counts().to_string(header=False))
     print(f"\n  Date range: {df['publish_date'].min().date()} to "
           f"{df['publish_date'].max().date()}")
-    print(f"  Quotes: {df['is_quote'].sum()} ({df['is_quote'].mean():.1%})")
 
     # Save mentions
-    mentions_path = os.path.join(PROCESSED_DIR, "party_mentions.csv")
-    df.to_csv(mentions_path, index=False)
+    mentions_path = os.path.join(PROCESSED_DIR, "party_mentions.tsv")
+    df.to_csv(mentions_path, index=False, sep="\t")
     print(f"\n  Saved {mentions_path}")
-
-    # Save article-level summary
-    summary = (
-        df.groupby(["url", "title", "publish_date"])
-        .agg(
-            parties=("party", lambda x: ", ".join(sorted(set(x)))),
-            n_total=("party", "count"),
-            n_plaid=("party", lambda x: (x == "plaid_cymru").sum()),
-            n_reform=("party", lambda x: (x == "reform_uk").sum()),
-            n_labour=("party", lambda x: (x == "labour").sum()),
-            n_conservative=("party", lambda x: (x == "conservative").sum()),
-            n_ukip=("party", lambda x: (x == "ukip").sum()),
-        )
-        .reset_index()
-    )
-    summary_path = os.path.join(PROCESSED_DIR, "article_summary.csv")
-    summary.to_csv(summary_path, index=False)
-    print(f"  Saved {summary_path} ({len(summary)} articles with mentions)")
 
 
 if __name__ == "__main__":
