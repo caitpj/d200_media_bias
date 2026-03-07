@@ -1,0 +1,12 @@
+{
+  "reform_uk": {
+    "mentions": 6719,
+    "articles": 1390,
+    "biased": 1480
+  },
+  "plaid_cymru": {
+    "mentions": 7936,
+    "articles": 2691,
+    "biased": 1154
+  }
+}

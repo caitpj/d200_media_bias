@@ -1,0 +1,19 @@
+{
+  "reform_uk_news": 6719,
+  "reform_uk_opinion": 1810,
+  "plaid_cymru_news": 7936,
+  "plaid_cymru_opinion": 1790,
+  "labour_news": 19135,
+  "labour_opinion": 4694,
+  "conservative_news": 11591,
+  "conservative_opinion": 1870,
+  "total": 55545,
+  "reform_uk_news_biased": 1480,
+  "reform_uk_opinion_biased": 1576,
+  "plaid_cymru_news_biased": 1154,
+  "plaid_cymru_opinion_biased": 1221,
+  "labour_news_biased": 3612,
+  "labour_opinion_biased": 3667,
+  "conservative_news_biased": 2540,
+  "conservative_opinion_biased": 1592
+}
