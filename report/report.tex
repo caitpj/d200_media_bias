@@ -1,0 +1,122 @@
+\documentclass{article}
+
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{booktabs}
+\usepackage[accepted]{icml2025}
+\usepackage{xurl}
+
+\icmltitlerunning{Does Welsh Media Need a Review? Detecting Bias in Nation.Cymru's Political Reporting}
+
+\begin{document}
+
+\twocolumn[
+\icmltitle{Does Welsh Media Need a Review?\\
+Detecting Bias in Nation.Cymru's Political Reporting}
+
+\icmlsetsymbol{equal}{*}
+
+\begin{icmlauthorlist}
+\icmlauthor{Cai Parry-Jones}{cam}
+\end{icmlauthorlist}
+
+\icmlaffiliation{cam}{University of Cambridge, Cambridge, United Kingdom}
+
+\icmlcorrespondingauthor{Cai Parry-Jones}{ctp27@cam.ac.uk}
+
+\icmlkeywords{media bias, NLP, sentiment analysis, LLM, Welsh politics}
+
+\vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+\setcounter{footnote}{1} % skip 1, which is used by the affiliation
+
+\begin{abstract}
+Wales' political landscape has been marked by growing accusations of bias in Welsh media. This paper takes the first computational step toward testing those claims by examining Nation.Cymru, a prominent Welsh political news outlet that claims to ``report on all political parties without fear or favour.'' I use a two-stage NLP pipeline: (1) a RoBERTa-based bias detector for cheap bias discovery and (2) a large language model (LLM; Claude Sonnet 4.6) for target-attributed sentiment classification. A primary analysis of 15,583 party mentions across 2022–2026 news articles finds that Reform UK attracts on-target biased framing at twice the rate of Plaid Cymru and over three times the mean negative sentiment ($p<0.001$). A secondary analysis across four parties in both news and opinion articles reveals that the dominant pattern is not which party is framed most negatively, but that Plaid Cymru is a clear positive outlier, receiving markedly more favourable framing than any other party, while all three remaining parties fall below the article-type mean. These findings provide evidence of measurable differential framing in Welsh political media, supporting calls for a broader review of Welsh media coverage. Furthermore, the two-stage pipeline offers a low-cost, replicable framework for extending this analysis to other Welsh outlets, as well as other media ecosystems outside of Wales.
+\end{abstract}
+
+\section{Introduction}
+
+The run-up to the 2026 Welsh Parliament (Senedd) elections has been marked by growing accusations of political bias in Welsh media. Representatives from both the Conservatives and Reform UK have publicly questioned the impartiality of political news coverage in Wales.\footnote{BBC News, ``Reform calls for review into BBC and Plaid relationship'', 11 November 2025.}\textsuperscript{,}\footnote{Nation.Cymru, ``Tory MS raises concerns over `impartial' media coverage of Senedd election'', 21 February 2026.} But are these complaints supported by evidence?
+
+This paper offers the first computational approach to answering this by examining Nation.Cymru, a prominent and award-winning\footnote{Journalists' Charity, Wales Media Awards 2025, 17 January 2026.} Welsh political news outlet. Nation.Cymru describes itself as an independent, national news service that reports on ``all political parties without fear or favour.''\footnote{Nation.Cymru, ``Our only bias is in favour of truth and honesty and against those who lie and deceive'', 6 December 2025.} However, its founding charter names Labour, Plaid Cymru, and the Conservatives among parties that ``all have something to contribute'', notably omitting Reform UK. This editorial positioning is relevant context for interpreting the results. Its accessible API archive makes it a natural starting point for computational analysis. With polling placing Reform UK and Plaid Cymru as the two leading parties, I focus on whether Nation.Cymru's coverage exhibits measurable differential sentiment bias between them and other parties. If bias is detectable in this outlet, it strengthens the case for a broader review of Welsh political media. Furthermore, with the next Senedd controlling a \pounds27bn budget, media bias is not just an electoral concern, it is an economic one \citep{besley2006, larcinese2011}.
+
+\section{Literature Review}
+
+\citet{kuila2024} distinguish two dimensions of media bias: how often an outlet uses loaded language when mentioning a party (\textit{frequency}), and whether that language is favourable or unfavourable (\textit{direction}). If editorial framing can shape public perceptions of parties \citep{entman1993}, then systematic differences in tone across parties constitute a meaningful form of media bias.
+
+Systematic reviews confirm that media bias is increasingly detectable through NLP methods \citep{rodrigogines2024, spinde2023}. For sentence-level bias detection, \citet{spinde2021} introduced the BABE expert-annotated dataset, on which the \texttt{himel7/bias-detector} RoBERTa model used in this project was fine-tuned \citep{ghosh2025}. Recent work shows that LLMs can match or exceed fine-tuned classifiers on sentiment tasks, but at substantially higher computational cost \citep{shao2025}. Model cascading, where a lightweight model handles simple cases and a costlier model is reserved for harder ones, has been shown to reduce costs without a noticeable reduction in accuracy \citep{yue2024}. This motivates the two-stage pipeline design described in Section~4.
+
+\section{Data}
+
+Nation.Cymru does not provide a structured database for research access. I therefore collected articles via its WordPress REST API, parsing the returned HTML into plain text. To avoid irrelevant articles, only those containing at least two Welsh politics keywords (e.g.,\ `Senedd', party names, notable political figures; see code repository for full list) were requested. This yields 11{,}847 articles spanning 2017-2026.
+
+I extract individual party mentions via string matching, with a $\pm 1$ sentence context window around each. Sentences shorter than 30 characters (photo captions, stubs) are excluded to prevent double-counting of context already captured by adjacent mentions. Quoted speech is deliberately retained rather than pre-filtered: an initial heuristic quote detector proved unreliable, and the LLM's target-attribution step (Stage~2) subsumes this function by classifying party-as-speaker mentions as off-target. The primary analysis restricts to Reform UK and Plaid Cymru, 2022-2026 (the inter-election period following the 2021 Senedd election), news articles only, yielding 15{,}583 mentions (7{,}237 Reform; 8{,}346 Plaid). The secondary analysis covers four parties from 2022--2026 across news and opinion (57{,}938 mentions).
+
+\section{Methodology}
+
+\paragraph{Stage~1: Bias detection.}
+Each mention's context window is classified as \textsc{biased}/\textsc{non-biased} using \texttt{himel7/bias-detector}, a RoBERTa model fine-tuned on the BABE dataset for sentence-level media bias detection \citep{ghosh2025}. This stage is lightweight enough to classify all mentions locally, passing only those containing loaded language forward to Stage~2.
+
+\paragraph{Stage~2: Target attribution and sentiment analysis.}
+A key challenge is distinguishing bias \textit{about} a party from sentiment \textit{expressed by} a party (e.g.,\ ``Plaid criticised the devastating policy'' has negative language, but Plaid is the speaker, not the target). I initially tested a dedicated sentiment model but found it lacked the nuanced reasoning needed to distinguish speaker from target.\footnote{\texttt{cardiffnlp/twitter-roberta-base-sentiment-\allowbreak latest}, a RoBERTa model fine-tuned on ${\sim}124$M tweets for three-class sentiment. See \url{https://huggingface.co/cardiffnlp/twitter-roberta-base-sentiment-latest}.} I therefore use the LLM Claude Sonnet 4.6 \citep{anthropic2026} via API as a prompted classifier (prompt available in the code repository). For each biased mention it returns: (1)~\texttt{on\_target} (1/0): is the bias directed at the named party (off-target mentions are excluded); (2)~sentiment score on a 5-point categorical scale $s \in \{-1, -0.5, 0, +0.5, +1\}$; (3)~one-sentence reasoning. The prompt includes speaker-vs-target examples and a self-check instruction.
+
+\paragraph{Design choices.} Context window $\pm 1$ was selected after testing windows of 0, 1, and 2 sentences around each mention (see code repository); larger windows increased the bias detection rate, consistent with findings that transformer classifiers are sensitive to surrounding context for bias identification \citep{spinde2021}. However, larger context windows lead to higher costs for Stage~2 processing; $\pm 1$ was deemed a good middle ground. The LLM prompt uses a reasoning-first output format (reasoning before classification fields), which improves classification quality. The dataset is large enough that incomplete bias detection does not preclude statistical significance.
+
+\paragraph{Implementation.} Stage~1: run locally on an M3 MacBook Air. Stage~2: Anthropic API; total cost was approximately \$6 for the primary analysis and \$5 for the secondary, where classification was capped at 250 randomly selected biased mentions per party per article type. Without this cap, the secondary analysis would have cost an estimated \$40+. All code and data are available at \url{https://github.com/caitpj/d200_media_bias}.
+
+\begin{table*}[t]
+\caption{Primary analysis: Reform UK vs Plaid Cymru, news articles, 2022--2026.}
+\label{tab:primary}
+\centering\small
+\begin{tabular}{lcc}
+\toprule
+ & \textbf{Reform UK} & \textbf{Plaid Cymru} \\
+\midrule
+Total mentions & 7{,}237 & 8{,}346 \\
+On-target biased (\% of total) & 1{,}124 (15.5\%) & 629 (7.5\%) \\
+Mean sentiment & $-0.735$ & $-0.211$ \\
+Strongly negative (\% of total) & 668 (9.2\%) & 147 (1.8\%) \\
+\midrule
+Bias rate $z$-test & \multicolumn{2}{c}{$z = 15.75$, $p < 0.001$, $h = 0.25$} \\
+Sentiment $t$-test & \multicolumn{2}{c}{$t = -20.93$, $p < 0.001$, $d = -1.04$} \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\section{Results}
+
+The primary analysis compares Reform UK and Plaid Cymru in news articles (15{,}583 mentions). Reform attracts on-target biased framing at twice Plaid's rate and over three times the negative sentiment, a large and statistically significant gap ($p < 0.001$; Table~\ref{tab:primary}).
+
+The secondary analysis extends to four parties across news and opinion (Figure~\ref{fig:secondary}). The most striking pattern is that Plaid Cymru is a clear positive outlier, receiving markedly more favourable framing than any other party in both news and opinion articles. Reform UK, the Conservatives, and Labour all cluster below the article-type mean. Despite being the only party omitted from the founding charter, Reform UK is not framed significantly differently from Labour and the Conservatives, parties the charter welcomes.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\columnwidth]{sentiment_bars.pdf}
+\caption{Mean sentiment relative to article-type mean (news: $-0.590$; opinion: $-0.479$), 2022-2026. Note, negative baselines are typical of political news coverage \citep{thesen2024}. Error bars show 95\% confidence intervals.}
+\label{fig:secondary}
+\end{figure}
+
+\section{Discussion}
+
+\paragraph{Findings.} These findings are consistent with the complaints discussed in the Introduction, and provide the first computational evidence of differential framing in Welsh political media. The secondary analysis suggests that the dominant pattern is not that Reform UK is singled out for negative treatment, but that Plaid Cymru receives uniquely favourable framing, a finding at odds with the outlet's claim to report on all parties without fear or favour. However, these findings reflect a single outlet; whether this pattern extends across Welsh media remains an open question, but the results presented here suggest that a broader review is warranted.
+On the methodology side, the LLM target-attribution step is critical for valid statement bias measurement: without it, 33.4\% of biased mentions would be misattributed. This underscores the capacity of contemporary LLMs to handle nuanced classification tasks that exceed the capabilities of fine-tuned specialist models. More broadly, the two-stage design offers a low-cost, replicable framework for measuring media bias in other outlets and media ecosystems.
+
+\paragraph{Limitations.} Gatekeeping bias, whether an outlet selectively covers or ignores stories, is a key dimension of media bias \citep{dalessio2000} but has not and cannot be assessed from a single outlet. LLM outputs are stochastic, so exact replication of results is not guaranteed. When both parties appear in the same context window, the LLM occasionally assesses the more salient party rather than the one it was asked about (${\sim}6\%$ of on-target classifications). Keyword matching cannot handle coreference, missing anaphoric references to previously mentioned parties (e.g., ``the party's reckless decisions''). Statistical tests treat each mention as independent, but mentions from the same article may be correlated.
+
+\paragraph{Next steps.} Extending to other Welsh outlets (BBC Wales, WalesOnline) would establish whether this pattern is specific to Nation.Cymru or shared across Welsh media, and would also enable measurement of gatekeeping bias for individual outlets \citep{kuila2024}. With a larger budget, the 250-mention random sampling cap in the secondary analysis could be removed. Clustering standard errors by article would account for within-article correlation and provide more robust inference.
+
+\section*{Acknowledgements}
+
+The author is a spokesperson for Reform UK Wales. Partly to mitigate the risk of researcher bias, the full pipeline code and data access instructions are publicly available for independent replication.
+
+\section*{Impact Statement}
+
+This paper aims to advance the computational measurement of media bias. Publishing bias findings about a named outlet during an election period could influence public trust in that outlet.
+
+\bibliographystyle{icml2025}
+\bibliography{references}
+
+\end{document}
