@@ -48,7 +48,7 @@ PARTIES = {
         "group": "left",
     },
     "conservative": {
-        "terms": ["Conservative", "RT Davies", "Tories", "Tory", "Darren Miller"],
+        "terms": ["Conservative", "RT Davies", "Tories", "Tory", "Darren Millar"],
         "group": "right",
     },
     "ukip": {

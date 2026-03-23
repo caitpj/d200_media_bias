@@ -1,4 +1,4 @@
-# Does Welsh Media Need a Review? Detecting Bias in Nation.Cymru’s Political Reporting
+# Does Welsh Media Need a Review? Detecting Bias in Nation.Cymru's Political Reporting
 
 Cai Parry-Jones · D200 Machine Learning in Economics · University of Cambridge · March 2026
 
@@ -43,11 +43,11 @@ This two-stage cascade keeps costs low while handling the nuanced speaker-vs-tar
 │   ├── analyse_secondary.py     # Secondary analysis: 4 parties, news vs opinion
 │   ├── ml_utils.py              # Shared ML pipeline (bias detector + LLM classification)
 │   ├── visualise.py             # Generate the sentiment bar chart
-│   ├── tune_context_window.py   # Context window size experiment
-│   ├── quick_data_check.py      # Print mention counts for the report
-│   └── show_examples.py         # Display example biased sentences
+│   └── quick_data_check.py      # Print mention counts for the report
 ├── report/
-│   ├── report.tex               # Project report
+│   ├── report.tex               # Project report in LaTeX
+│   ├── D200_report_final.pdf    # Project report in PDF
+│   ├── Project_Presentation.pdf # Slides for oral exam
 │   ├── references.bib           # Bibliography
 │   ├── figures/                 # Generated figures (e.g. sentiment_bars.pdf)
 │   └── style/                   # ICML 2025 LaTeX style files
@@ -76,7 +76,7 @@ export ANTHROPIC_API_KEY='your-key-here'
 ### Run the full pipeline
 
 ```bash
-# 1. Scrape articles from Nation.Cymru (11,847 articles)
+# 1. Scrape articles from Nation.Cymru
 python scripts/scrape.py
 
 # 2. Extract party mentions with context windows
@@ -96,4 +96,4 @@ Each analysis script can also run individual stages with `--bias`, `--llm`, or `
 
 ### Note on replication
 
-LLM outputs are stochastic, exact numbers will vary slightly between runs, but replications show the overall patterns still holds.
+LLM outputs are stochastic, exact numbers will vary slightly between runs, but replications show the overall pattern still holds.
