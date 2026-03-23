@@ -37,7 +37,7 @@ SEARCH_TERMS = [
     "Senedd",
     "election",
     "Welsh government",
-    # Plaid Cymru (nationalist)
+    # Plaid Cymru
     "Plaid Cymru",
     "Plaid",
     "Rhun ap Iorwerth",
